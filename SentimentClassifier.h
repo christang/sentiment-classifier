@@ -24,13 +24,11 @@ struct CDecision
 	int decision;
 	// classification decision; 1: positive; 0: neutral; -1: negative
 
-	int score;
-	// confidence score; Range TBD
+	int raw_score;
+	// decision score; open range
 
-	int negative;
-	int neutral;
-	int positive;
-	// individual scores for each classification
+	int confidence;
+	// decision confidence; normalized score per feature [ -1000, 1000 ]
 
 	string content;
 	// normalized content produced by Classifier
@@ -44,10 +42,8 @@ struct FeatureScores
 {
 	FeatureScores();
 
-	int negative;
-	int neutral;
-	int positive;
-	// feature score per class
+	int score;
+	// composite feature score
 
 	int relevance;
 	// relevance score of feature
@@ -57,6 +53,7 @@ struct FeatureScores
 //typedef boost::unordered_map<string,FeatureScores> FeaturesTable;
 
 typedef map<string,int> StopwordsTable;
+typedef map<string,int> FeaturesCount;
 typedef map<string,FeatureScores> FeaturesTable;
 
 class SentimentClassifier {
@@ -68,17 +65,23 @@ public:
 	bool Classify ( const string& title, const string& body,
 				    const string& url, CDecision& cd );
 
+	void setUseQuestionMarks ( bool qm );
 	void setRelevanceCutoff ( float rc );
+	void setNeutralCutoff ( float nc );
 	void setMaxFeatureSize ( unsigned int mfs );
 	void setDebugLevel ( unsigned int dl );
 
+	bool getUseQuestionMarks () const;
 	float getRelevanceCutoff () const;
+	float getNeutralCutoff ( ) const;
 	unsigned int getMaxFeatureSize () const;
 	unsigned int getDebugLevel () const;
 	string getErrorMsg () const;
 
 private:
+	bool UseQuestionMarks;
 	float RelevanceCutoff;
+	float NeutralCutoff;
 	unsigned int MaxFeatureSize;
 	unsigned int DebugLevel;
 	string error_msg;
@@ -91,16 +94,19 @@ private:
 	bool readFeatures ( const string& features_file );
 	bool readStopwords ( const string& stopwords_file );
 	bool parseFeature ( string& phrase, string& entry );
-	bool scaleRawValue ( float raw_value, int& scaled_value );
 	bool normalizeContent ( const string& content, string& ncontent );
 	bool normalizeUrl ( const string& content, string& ncontent );
 	bool classifyGreedy ( int weight, string& ncontent, CDecision& cd );
-	float getRawValue ( int scaled_value );
+	bool classifySentences ( int weight, const string& ucontent,
+			CDecision& cd );
+	bool classifyQuestionMarks ( int weight, const string& ucontent,
+			CDecision& cd );
 
 	FeaturesTable features;
 	StopwordsTable stopwords;
 
-	static const float FeatureScoreScale = 1000.f;
+	// This is an arbitrary scaling unit. Revisit later.
+	static const float FeatureScoreScale = 288.f; // = 200/ln(2)
 };
 
 #endif /* SENTIMENTCLASSIFIER_H_ */

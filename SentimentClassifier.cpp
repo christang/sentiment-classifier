@@ -15,24 +15,74 @@
 
 using namespace boost::xpressive;
 
+bool SentimentClassifier::classifySentences ( int weight,
+		const string& ucontent, CDecision& cd )
+{
+	string content ( ucontent );
+
+	sregex urlx = sregex::compile( "(http:[\\/\\w\\d\\.\\=\\&\\?]+)" );
+	content = regex_replace ( content, urlx, " " );
+
+	vector<string> sentences;
+	boost::split ( sentences, content, boost::is_any_of ( ";?!" ) );
+
+	for ( vector<string>::iterator sentence = sentences.begin();
+			sentence != sentences.end(); sentence++ ) {
+		CDecision cd_s;
+		string nsentence;
+
+		if ( normalizeContent ( *sentence, nsentence ) )
+			classifyGreedy ( weight, nsentence, cd_s );
+		else return false;
+
+		cd.content += cd_s.content + "; ";
+		cd.raw_score += cd_s.raw_score;
+		cd.confidence += cd_s.confidence;
+		cd.features.insert(cd.features.end(),
+						   cd_s.features.begin(),cd_s.features.end());
+	}
+
+	if ( cd.features.size() == 0 ) {
+		cd.confidence = -1;
+		error_msg = "no decision could be reached";
+	} else {
+		int min_sentiment = int ( FeatureScoreScale * NeutralCutoff );
+
+		// confidence is average relevance normalized over observed features
+		cd.confidence /= int ( sentences.size() );
+
+		// decision is based on sign of score
+		if ( cd.raw_score )
+			cd.decision = ( cd.raw_score < 0 ) ? -1 : 1;
+
+		// decision is neutral if score doesn't exceed threshold
+		if ( abs ( cd.raw_score ) < min_sentiment )
+			cd.decision = 0;
+
+		// decision is neutral if confidence is low
+		// if ( cd.confidence < min_sentiment ) cd.decision = 0;
+	}
+
+	return ( cd.confidence >= 0 );
+}
+
 bool SentimentClassifier::classifyGreedy ( int weight,
 		string& content, CDecision& cd )
 {
 
 	try {
 		int cutoff = int ( FeatureScoreScale * RelevanceCutoff );
+		int min_sentiment = int ( FeatureScoreScale * NeutralCutoff );
 
-		cd.content += content + "  ";
-
-		int negative_score = 0;
-		int neutral_score  = 0;
-		int positive_score = 0;
+		cd.content = content;
 
 		vector<string> tokens;
 		boost::split ( tokens, content, boost::is_any_of ( " " ) );
 
-		if ( DebugLevel > 1 )
-			cout << "Content: " << cd.content << endl;
+		if ( DebugLevel > 2 )
+			cout << "Content? " << cd.content << endl;
+
+		FeaturesCount fc;
 
 		for ( unsigned int i=0; i < tokens.size(); ++i ) {
 			string test_feature = "";
@@ -45,83 +95,147 @@ bool SentimentClassifier::classifyGreedy ( int weight,
 					ss << tokens[i];
 					for ( unsigned int u = i+1 ; u < t ; ++u )
 						ss << " " << tokens[u];
-					if ( DebugLevel > 1 )
-						cout << "Feature: " << ss.str();
+					if ( DebugLevel > 2 )
+						cout << "Feature? " << ss.str();
 
-					if ( features.find( ss.str() ) != features.end() ) {
-						if ( DebugLevel > 1 )
-							cout << " *Found, rc = " <<
+					if ( features.find ( ss.str() ) != features.end() ) {
+						if ( DebugLevel > 2 )
+							cout << "; YES rc = " <<
 								features[ ss.str() ].relevance;
 						if ( features[ ss.str() ].relevance > cutoff ) {
-							if ( DebugLevel > 1 )
-								cout << " meets cutoff (" <<
+							if ( DebugLevel > 2 )
+								cout << "; PASSES cutoff (" <<
 									cutoff << ")" << endl;
 							test_feature = ss.str();
 							break;
 						}
+					} else {
+						if ( DebugLevel > 2 )
+							cout << "; NO";
 					}
-					if ( DebugLevel > 1 )
+					if ( DebugLevel > 2 )
 						cout << endl;
 				}
 			}
 
 			if ( test_feature != "" ) {
-				FeatureScores* fs = &features[ test_feature ];
+				if ( fc.find( test_feature ) == fc.end() )
+					fc[test_feature] = 0;
+				fc[test_feature] ++;
 
-				cd.negative += weight * fs->negative;
-				cd.neutral  += weight * fs->neutral;
-				cd.positive += weight * fs->positive;
-				cd.features.push_back( test_feature );
-
-				if ( DebugLevel > 0 ) cout << test_feature <<
-						" (neg=" << weight * fs->negative <<
-						" neu=" << weight * fs->neutral <<
-						" pos=" << weight * fs->positive << ")" << endl;
-
-				if ( fs->neutral > fs->positive && fs->neutral > fs->negative)
-					{ neutral_score++; }
-				else if ( fs->positive > fs->negative )
-					{ positive_score++; }
-				else if ( fs->negative > fs->positive )
-					{ negative_score++; }
+				if ( DebugLevel > 1 ) cout << test_feature <<
+						" (" << features[ test_feature ].score << ")"
+						<< endl;
 
 				i += s-1;
 			}
 		}
 
-		if ( cd.neutral > cd.negative && cd.neutral > cd.positive )
-			{ cd.decision = 0; cd.score = neutral_score; }
-		else if ( cd.positive > cd.negative )
-			{ cd.decision = 1; cd.score = positive_score; }
-		else if ( cd.negative > cd.positive )
-			{ cd.decision = -1; cd.score = negative_score; }
-		else // no decision could be reached
-			{ cd.decision = 0; cd.score = -1;
-			  error_msg = "no decision could be reached"; }
+		for ( FeaturesCount::const_iterator it = fc.begin();
+				it != fc.end(); it++ ) {
 
-		if ( cd.score > 255 ) cd.score = 255;
+			FeatureScores* fs = &features[ it->first ];
+
+			float feature_weight =
+				( 1.f + log ( float ( it->second ) ) / log ( 2.f ) );
+
+			int feature_score =
+				int ( feature_weight * float ( fs->score ) );
+
+			cd.raw_score += weight * feature_score;
+
+			cd.confidence += fs->score;
+			//cd.confidence += fs->relevance;
+
+			if ( DebugLevel > 0 ) {
+				stringstream ss;
+				ss << it->first << " *";
+				ss << it->second << " = ";
+				ss << feature_score;
+				cd.features.push_back( ss.str() );
+			} else {
+				cd.features.push_back( it->first );
+			}
+
+		}
+
+		if ( cd.features.size() == 0 ) {
+			cd.confidence = -1;
+			error_msg = "no decision could be reached";
+		} else {
+			// confidence is average relevance normalized over observed features
+			cd.confidence /= int ( cd.features.size() );
+			cd.confidence = abs ( cd.confidence );
+
+			// decision is based on sign of score
+			if ( cd.raw_score )
+				cd.decision = ( cd.raw_score < 0 ) ? -1 : 1;
+
+			// decision is neutral if score doesn't exceed threshold
+			if ( abs ( cd.raw_score ) < min_sentiment )
+				cd.decision = 0;
+
+			// decision is neutral if confidence is low
+			// if ( cd.confidence < min_sentiment ) cd.decision = 0;
+		}
+
 	} catch (...) {
-		cd.score = -1;
+		cd.confidence = -1;
 		error_msg = "error in SentimentClassifier::classifyGreedy";
 	}
 
-	return ( cd.score >= 0 );
+	return ( cd.confidence >= 0 );
+}
+
+bool SentimentClassifier::classifyQuestionMarks ( int weight,
+		const string& ucontent, CDecision& cd)
+{
+	string feature ( ucontent );
+
+	sregex urlx = sregex::compile( "(http:[\\/\\w\\d\\.\\=\\&\\?]+)" );
+	feature = regex_replace ( feature, urlx, " " );
+
+	float qm_ratio = float ( feature.size() );
+
+	sregex non_qmx = sregex::compile( "[^\\?]" );
+	feature = regex_replace ( feature, non_qmx, "" );
+
+	qm_ratio = float ( feature.size() ) / qm_ratio;
+	float raw_score = 0.f;
+	if ( qm_ratio > 0.001f )
+		raw_score = FeatureScoreScale * ( -156.f * qm_ratio - 0.3f );
+
+	//float qm_count = float ( feature.size() );
+	//float raw_score = FeatureScoreScale * -0.37f * sqrt ( qm_count );
+
+	cd.confidence = 0;
+	cd.decision = cd.raw_score < 0 ? -1 : 0;
+	cd.raw_score = weight * int ( raw_score );
+	if ( DebugLevel > 0 ) {
+		stringstream ss;
+		ss << "?: '" << feature << "' = " << int ( raw_score );
+		cd.features.push_back( ss.str() );
+	} else {
+		if ( qm_ratio > 0.f ) cd.features.push_back( feature );
+	}
+
+	return ( cd.confidence >= 0 );
 }
 
 CDecision::CDecision ()
-	: decision(0), score(-1), negative(0), neutral(0), positive(0),
-	  content(), features()
+	: decision(0), raw_score(0), confidence(0), content(), features()
 {}
 
 FeatureScores::FeatureScores ()
-	: negative(0), neutral(0), positive(0), relevance(0)
+	: score(0), relevance(0)
 {}
 
 SentimentClassifier::SentimentClassifier (
 		const string& feature_file, const string& stopword_file)
-	: RelevanceCutoff (1.0f), MaxFeatureSize (3), DebugLevel (0),
-	  error_msg (), TitleWeight (3), BodyWeight (1), URLWeight (1),
-	  isInited (false), features (), stopwords ()
+	: UseQuestionMarks (true),
+	  RelevanceCutoff (1.0f), NeutralCutoff (1.0f), MaxFeatureSize (3),
+	  DebugLevel (0), error_msg (), TitleWeight (3), BodyWeight (1),
+	  URLWeight (1), isInited (false), features (), stopwords ()
 {
 	isInited =
 			readFeatures (feature_file);
@@ -132,10 +246,29 @@ bool SentimentClassifier::Classify (
 		const string& content, CDecision& cd)
 // return true if sentiment classification is successful; return false otherwise;
 {
-	string ncontent;
-	if ( normalizeContent ( content, ncontent ) )
-		return classifyGreedy ( 1, ncontent, cd );
-	else return false;
+
+	if ( ! classifySentences ( 1, content, cd ) )
+		return false;
+
+	if ( UseQuestionMarks ) {
+		CDecision cd_qm;
+		classifyQuestionMarks ( 1, content, cd_qm );
+
+		cd.features.push_back( cd_qm.features[0] );
+		cd.raw_score += cd_qm.raw_score;
+
+		int min_sentiment = int ( FeatureScoreScale * NeutralCutoff );
+
+		// decision is based on sign of score
+		if ( cd.raw_score )
+			cd.decision = ( cd.raw_score < 0 ) ? -1 : 1;
+
+		// decision is neutral if score doesn't exceed threshold
+		if ( abs ( cd.raw_score ) < min_sentiment )
+			cd.decision = 0;
+	}
+
+	return true;
 }
 
 bool SentimentClassifier::Classify (
@@ -160,34 +293,55 @@ bool SentimentClassifier::Classify (
 	else return false;
 
 	try {
-		cd.content  = cd_title.content + cd_body.content + cd_url.content;
+		int min_sentiment = int ( FeatureScoreScale * NeutralCutoff );
+
+		cd.content  =
+				cd_title.content + "+ " +
+				cd_body.content + "+ " +
+				cd_url.content;
+
 		cd.features.insert(cd.features.end(),
 						   cd_title.features.begin(),cd_title.features.end());
 		cd.features.insert(cd.features.end(),
 						   cd_body.features.begin(),cd_body.features.end());
 		cd.features.insert(cd.features.end(),
 						   cd_url.features.begin(),cd_url.features.end());
-		cd.negative = cd_title.negative + cd_body.negative + cd_url.negative;
-		cd.neutral  = cd_title.neutral  + cd_body.neutral  + cd_url.neutral;
-		cd.positive = cd_title.positive + cd_body.positive + cd_url.positive;
 
-		if ( cd.neutral > cd.negative && cd.neutral > cd.positive )
-			{ cd.decision = 0; cd.score = 1; }
-		else if ( cd.positive > cd.negative )
-			{ cd.decision = 1; cd.score = 1; }
-		else if ( cd.negative > cd.positive )
-			{ cd.decision = -1; cd.score = 1; }
-		else // no decision could be reached
-			{ cd.decision = 0; cd.score = -1;
-			  error_msg = "no decision could be reached"; }
+		cd.raw_score =
+				cd_title.raw_score +
+				cd_body.raw_score +
+				cd_url.raw_score;
 
-		if ( cd.score > 255 ) cd.score = 255;
+
+		if ( cd.features.size() == 0 ) {
+			cd.confidence = -1;
+			error_msg = "no decision could be reached";
+		} else {
+			// confidence is average relevance normalized over observed features
+			cd.confidence =
+				(	cd_title.confidence * TitleWeight +
+					cd_body.confidence * BodyWeight +
+					cd_url.confidence * URLWeight 	) /
+				(	TitleWeight + BodyWeight + URLWeight 	);
+
+			// decision is based on sign of score
+			if ( cd.raw_score )
+				cd.decision = ( cd.raw_score < 0 ) ? -1 : 1;
+
+			// decision is neutral if score doesn't exceed threshold
+			if ( abs ( cd.raw_score ) < min_sentiment )
+				cd.decision = 0;
+
+			// decision is neutral if confidence is low
+			// if ( cd.confidence < min_sentiment ) cd.decision = 0;
+		}
+
 	} catch (...) {
-		cd.score = -1;
+		cd.confidence = -1;
 		error_msg = "error in SentimentClassifier::Classify";
 	}
 
-	return ( cd.score >= 0 );
+	return ( cd.confidence >= 0 );
 }
 
 bool SentimentClassifier::normalizeUrl (
@@ -219,55 +373,26 @@ bool SentimentClassifier::normalizeContent (
 	try {
 		ncontent = boost::to_lower_copy ( content );
 
-		boost::replace_all ( ncontent, "[...]" , " " );
-		boost::replace_all ( ncontent, "(...)" , " " );
-		boost::replace_all ( ncontent, "^" , "" );
-		boost::replace_all ( ncontent, "," , " " );
-		boost::replace_all ( ncontent, "(" , " " );
-		boost::replace_all ( ncontent, ")" , " " );
-		boost::replace_all ( ncontent, "-" , " " );
-		boost::replace_all ( ncontent, "\"" , " " );
-		boost::replace_all ( ncontent, ": " , " " );
+		// hash_tag hiding for tweets
+        sregex hashx = sregex::compile( "^#\\S+| #\\S+" );
+        ncontent = regex_replace ( ncontent, hashx, " " );
 
-		sregex quotx1 = sregex::compile( "^'| '" );
-		ncontent = regex_replace ( ncontent, quotx1, " " );
+        // at_tag hiding for tweets
+        sregex atx = sregex::compile( "^@\\S+| @\\S+" );
+        ncontent = regex_replace ( ncontent, atx, " " );
 
-		sregex quotx2 = sregex::compile( "'$|' " );
-		ncontent = regex_replace ( ncontent, quotx2, " " );
+        // hiding http tagged urls
+		sregex urlx = sregex::compile( "http:[\\/\\w\\d\\.\\=\\&\\?]+" );
+		ncontent = regex_replace ( ncontent, urlx, "" );
 
-		sregex hashx = sregex::compile( "^#\\S+| #\\S+" );
-		ncontent = regex_replace ( ncontent, hashx, " " );
+		sregex symbolx = sregex::compile( "[^a-z0-9\\']" );
+		ncontent = regex_replace ( ncontent, symbolx, " " );
 
-		sregex atx = sregex::compile( "^@\\S+| @\\S+" );
-		ncontent = regex_replace ( ncontent, atx, " " );
+		sregex wsx = sregex::compile( "\\s+" );
+		ncontent = regex_replace ( ncontent, wsx, " " );
 
-		sregex urlx = sregex::compile( "(http:[\\/\\w\\d\\.\\=\\&\\?]+)" );
-
-		sregex_iterator cur( ncontent.begin(), ncontent.end(), urlx );
-		sregex_iterator end;
-
-		for( ; cur != end; ++cur ) {
-			boost::replace_all (
-					ncontent, cur->str(), boost::to_upper_copy (cur->str()) );
-		}
-
-		sregex perx1 = sregex::compile( "\\s*\\.\\.+\\s*" );
-		ncontent = regex_replace ( ncontent, perx1, " " );
-
-		sregex perx2 = sregex::compile( "([ a-z])\\.([ a-z])" );
-		ncontent = regex_replace ( ncontent, perx2, "$1 $2" );
-
-		sregex slashx = sregex::compile( "([ a-z])\\/([ a-z])" );
-		ncontent = regex_replace ( ncontent, slashx, "$1 $2" );
-
-		sregex uscorex = sregex::compile( "([ a-z])_([ a-z])" );
-		ncontent = regex_replace ( ncontent, uscorex , "$1 $2" );
-
-		sregex endx = sregex::compile( "\\W*$" );
-		ncontent = regex_replace ( ncontent, endx, "" );
-
-		sregex spacex = sregex::compile( "\\s+" );
-		ncontent = regex_replace ( ncontent, spacex, " " );
+		sregex trimx = sregex::compile( "^\\s+|\\s+$" );
+		ncontent = regex_replace ( ncontent, trimx, "" );
 
 		status = true;
 	} catch (...) {
@@ -308,56 +433,22 @@ bool SentimentClassifier::parseFeature ( string& phrase, string& entry )
 {
 	bool isSuccess = false;
 
-	if 			( phrase == "CLASS:" )  { isSuccess = true; }
-	else if 	( phrase == "TOTAL:" )  { isSuccess = true; }
-	else if 	( phrase == "WTOTAL:" ) { isSuccess = true; }
-	else { 	   // phrase is added to FeatureTable
-		float raw_negative;
-		float raw_neutral;
-		float raw_positive;
+	try { 	   // phrase is added to FeatureTable
 
+		int score_data;
 		stringstream iss (entry);
-		iss >> raw_negative;
-		iss >> raw_neutral;
-		iss >> raw_positive;
+		iss >> score_data;
 
-		int negative;
-		int neutral;
-		int positive;
+		features[phrase].score = score_data;
+		features[phrase].relevance = abs ( score_data );
 
-		isSuccess =
-				scaleRawValue (raw_negative, negative) &&
-				scaleRawValue (raw_neutral,  neutral) &&
-				scaleRawValue (raw_positive, positive);
+		isSuccess = true;
 
-		if ( isSuccess ) {
-			features[phrase].negative = negative;
-			features[phrase].neutral  = neutral;
-			features[phrase].positive = positive;
-
-			features[phrase].relevance = abs ( positive - negative );
-		} else {
-			error_msg = "Failed to parse feature line.";
-		}
+	} catch (...) {
+		error_msg = "error in SentimentClassifier::parseFeature";
 	}
 
 	return isSuccess;
-}
-
-bool SentimentClassifier::scaleRawValue (
-		float raw_value, int& scaled_value )
-{
-	if ( raw_value > 0.f ) {
-		scaled_value = (int) floor( FeatureScoreScale * log( raw_value ) );
-		return true;
-	} else {
-		return false;
-	}
-}
-
-float SentimentClassifier::getRawValue ( int scaled )
-{
-	return exp ( (float) scaled / FeatureScoreScale );
 }
 
 bool SentimentClassifier::readStopwords ( const string& stopwords_file )
@@ -380,6 +471,16 @@ bool SentimentClassifier::readStopwords ( const string& stopwords_file )
 	return isSuccess;
 }
 
+void SentimentClassifier::setUseQuestionMarks ( bool qm )
+{
+	UseQuestionMarks = qm;
+}
+
+bool SentimentClassifier::getUseQuestionMarks () const
+{
+	return UseQuestionMarks;
+}
+
 void SentimentClassifier::setRelevanceCutoff ( float rc )
 {
 	RelevanceCutoff = rc;
@@ -388,6 +489,16 @@ void SentimentClassifier::setRelevanceCutoff ( float rc )
 float SentimentClassifier::getRelevanceCutoff () const
 {
 	return RelevanceCutoff;
+}
+
+void SentimentClassifier::setNeutralCutoff ( float nc )
+{
+	NeutralCutoff = nc;
+}
+
+float SentimentClassifier::getNeutralCutoff () const
+{
+	return NeutralCutoff;
 }
 
 void SentimentClassifier::setMaxFeatureSize ( unsigned int mfs )
