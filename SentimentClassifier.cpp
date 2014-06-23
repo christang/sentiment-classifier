@@ -7,8 +7,6 @@
 
 #include "SentimentClassifier.h"
 
-#include <assert.h>
-
 #include <math.h>
 #include <fstream>
 #include <sstream>
@@ -17,321 +15,113 @@
 
 using namespace boost::xpressive;
 
-int calc_confidence ( int raw_score )
-{
-	int confidence = 50 + raw_score / 70;
-	if ( confidence > 100 ) confidence = 100;
-	if ( confidence <   1 ) confidence =   1;
-	return confidence;
-}
-
-int calc_decision ( int raw_score, float nc )
-{
-	int decision = 0;
-	int min_sentiment = int ( SentimentClassifier::FeatureScoreScale * nc );
-
-	if ( raw_score <= -min_sentiment ) decision = -1;
-	if ( raw_score >=  min_sentiment ) decision =  1;
-
-	return decision;
-}
-
-void collapse_ws ( string& ncontent )
-{
-	sregex wsx = sregex::compile( "\\s+" );
-	ncontent = regex_replace ( ncontent, wsx, " " );
-}
-
-int countFeatures ( const string& content, const string& feature )
-{
-	int count = 0;
-	typedef boost::find_iterator<string::const_iterator> string_find_iterator;
-    for ( string_find_iterator it=
-            boost::make_find_iterator ( content,
-            		boost::first_finder ( feature, boost::is_iequal() ) );
-    		it!=string_find_iterator (); ++it ) ++count;
-    return count;
-}
-
-void hide_urls ( string& ncontent )
-{
-	sregex urlx = sregex::compile ( "http:[_\\/\\w\\d\\.\\=\\&\\?\\-]+" );
-	ncontent = regex_replace ( ncontent, urlx, "'http'" );
-}
-
-void trim_ws ( string& ncontent )
-{
-	boost::trim ( ncontent );
-}
-
-void xlate_html_entities ( string& ncontent )
-{
-	boost::replace_all ( ncontent, "&quot;"  , "\"" );
-	boost::replace_all ( ncontent, "&amp;"   , "&" );
-	boost::replace_all ( ncontent, "&lt;"    , ">" );
-	boost::replace_all ( ncontent, "&gt;"    , "<" );
-	boost::replace_all ( ncontent, "&nbsp;"  , " " );
-	boost::replace_all ( ncontent, "&#34;"   , "\"" );
-	boost::replace_all ( ncontent, "&#034;"  , "\"" );
-	boost::replace_all ( ncontent, "&#35;"   , "#" );
-	boost::replace_all ( ncontent, "&#035;"  , "#" );
-	boost::replace_all ( ncontent, "&#39;"   , "'" );
-	boost::replace_all ( ncontent, "&#039;"  , "'" );
-	boost::replace_all ( ncontent, "&#96;"   , "'" );
-	boost::replace_all ( ncontent, "&#8211;" , "--" );
-	boost::replace_all ( ncontent, "&#8212;" , "--" );
-	boost::replace_all ( ncontent, "&#8220;" , "..." );
-	boost::replace_all ( ncontent, "&#8230;" , "..." );
-	boost::replace_all ( ncontent, "&heart;" , "'heart'" );
-
-	boost::replace_all ( ncontent, "\\u00b4" , "'" );
-	boost::replace_all ( ncontent, "\\u2019" , "'" );
-}
-
-void SentimentClassifier::classifyExclamationPoints (
-		int weight, const string& ucontent, CDecision& cd )
-{
-	string feature ( ucontent );
-
-	sregex non_epx = sregex::compile( "[^!]" );
-	feature = regex_replace ( feature, non_epx, "" );
-
-	float epc = float ( feature.size() );
-	epc = epc > 20 ? 20 : epc;
-
-	float raw_score = 0.f;
-
-	if ( feature.size() > 0 )
-		raw_score = SentimentClassifier::FeatureScoreScale *
-										 ( 0.002f * epc * epc
-										 - 0.083f * epc + 0.87f );
-
-	cd.raw_score = weight * int ( raw_score );
-	if ( feature.size() > 0 ) {
-		if ( DebugLevel > 0 ) {
-			stringstream ss;
-			ss << "!: '" << feature << "' = " << int ( raw_score );
-			cd.features.push_back( ss.str() );
-		} else {
-			cd.features.push_back( feature );
-		}
-	}
-}
-
-void SentimentClassifier::classifyQuestionMarks (
-		int weight, const string& ucontent, CDecision& cd )
-{
-	string feature ( ucontent );
-
-	hide_urls ( feature );
-
-	float qm_ratio = float ( feature.size() );
-
-	sregex non_qmx = sregex::compile( "[^\\?]" );
-	feature = regex_replace ( feature, non_qmx, "" );
-
-	qm_ratio = float ( feature.size() ) / qm_ratio;
-	float raw_score = 0.f;
-	if ( qm_ratio > 0.001f )
-		raw_score = FeatureScoreScale * ( -156.f * qm_ratio - 0.3f );
-
-	//float qm_count = float ( feature.size() );
-	//float raw_score = FeatureScoreScale * -0.37f * sqrt ( qm_count );
-
-	cd.raw_score = weight * int ( raw_score );
-	if ( qm_ratio > 0.f ) {
-		if ( DebugLevel > 0 ) {
-			stringstream ss;
-			ss << "?: '" << feature << "' = " << int ( raw_score );
-			cd.features.push_back( ss.str() );
-		} else {
-			cd.features.push_back( feature );
-		}
-	}
-}
-
-void SentimentClassifier::classifyTweetQuestionMarks (
-		int weight, const string& ucontent, CDecision& cd )
-{
-	string feature ( ucontent );
-
-	hide_urls ( feature );
-
-	sregex non_qmx = sregex::compile( "[^\\?]" );
-	feature = regex_replace ( feature, non_qmx, "" );
-
-	float raw_score = 0.f;
-	if ( feature.size() > 0 )
-		raw_score = FeatureScoreScale *
-			( -0.5533f * log ( float ( feature.size() ) ) - 0.3533f );
-
-	cd.raw_score = weight * int ( raw_score );
-	if ( raw_score < 0.f ) {
-		if ( DebugLevel > 0 ) {
-			stringstream ss;
-			ss << "?: '" << feature << "' = " << int ( raw_score );
-			cd.features.push_back( ss.str() );
-		} else {
-			cd.features.push_back( feature );
-		}
-	}
-}
-
-bool SentimentClassifier::classifySentences ( int weight,
-		const string& ucontent, CDecision& cd,
-		int ct, float rc, float nc )
-{
-	string content ( ucontent );
-
-	hide_urls ( content );
-	xlate_html_entities ( content );
-
-	vector<string> sentences;
-	boost::split ( sentences, content, boost::is_any_of ( ";?!" ) );
-
-	for ( vector<string>::iterator sentence = sentences.begin();
-			sentence != sentences.end(); sentence++ ) {
-		CDecision cd_s;
-		string nsentence;
-
-		if ( normalizeContent ( *sentence, nsentence ) )
-			classifyGreedy ( weight, nsentence, cd_s, ct, rc, nc );
-		else return false;
-
-		if ( DebugLevel > 0 ) cd.content += ";; " + nsentence;
-		cd.raw_score += cd_s.raw_score;
-		cd.features.insert(cd.features.end(),
-						   cd_s.features.begin(),cd_s.features.end());
-	}
-
-	if ( cd.features.size() == 0 ) {
-		cd.confidence = 0;
-		error_msg = "no decision could be reached";
-		return false;
-	} else {
-		cd.decision   = calc_decision   ( cd.raw_score, nc );
-		cd.confidence = calc_confidence ( cd.raw_score );
-		return true;
-	}
-}
-
 bool SentimentClassifier::classifyGreedy ( int weight,
-		string& content, CDecision& cd, int ct, float rc, float nc )
+		string& content, CDecision& cd )
 {
-	// Split content to obtain tokens
-	vector<string> tokens;
-	boost::split ( tokens, content, boost::is_any_of ( " " ) );
 
-	// Limit the size of the content
-	if ( tokens.size() > 500 )
-		tokens.erase ( tokens.begin(), tokens.end() - 500 );
+	try {
+		int cutoff = int ( FeatureScoreScale * RelevanceCutoff );
 
-	// Set up table to count repeated features
-	FeaturesCount fc;
+		cd.content += content + "  ";
 
-	// Create scaled relevance cutoff
-	int cutoff = int ( FeatureScoreScale * rc );
+		int negative_score = 0;
+		int neutral_score  = 0;
+		int positive_score = 0;
 
-	// Algorithm for extracting features from content
-	for ( unsigned int i=0; i < tokens.size(); ++i ) {
-		string test_feature = "";
-		unsigned int s = MaxFeatureSize;
+		vector<string> tokens;
+		boost::split ( tokens, content, boost::is_any_of ( " " ) );
 
-		for ( ; s > 0; --s ) {
-			stringstream ss;
-			unsigned int t = i+s;
-			if ( t <= tokens.size() ) {
-				ss << tokens[i];
-				for ( unsigned int u = i+1 ; u < t ; ++u )
-					ss << " " << tokens[u];
+		if ( DebugLevel > 1 )
+			cout << "Content: " << cd.content << endl;
 
-				if      ( ct == Regular ) ss << ":r" ;
-				else if ( ct == Twitter ) ss << ":t" ;
-				else {
-					error_msg = "invalid classification type";
-					return false ;
-				}
+		for ( unsigned int i=0; i < tokens.size(); ++i ) {
+			string test_feature = "";
+			unsigned int s = MaxFeatureSize;
 
-				// if ( DebugLevel > 2 ) cout << "Feature? " << ss.str();
+			for ( ; s > 0; --s ) {
+				stringstream ss;
+				unsigned int t = i+s;
+				if ( t <= tokens.size() ) {
+					ss << tokens[i];
+					for ( unsigned int u = i+1 ; u < t ; ++u )
+						ss << " " << tokens[u];
+					if ( DebugLevel > 1 )
+						cout << "Feature: " << ss.str();
 
-				if ( features.find ( ss.str() ) != features.end() ) {
-					// if ( DebugLevel > 2 ) cout << "; YES rc = " << features[ ss.str() ].relevance;
-					if ( features[ ss.str() ].relevance > cutoff ) {
-						// if ( DebugLevel > 2 ) cout << "; PASSES cutoff (" << cutoff << ")" << endl;
-						test_feature = ss.str();
-						break;
+					if ( features.find( ss.str() ) != features.end() ) {
+						if ( DebugLevel > 1 )
+							cout << " *Found, rc = " <<
+								features[ ss.str() ].relevance;
+						if ( features[ ss.str() ].relevance > cutoff ) {
+							if ( DebugLevel > 1 )
+								cout << " meets cutoff (" <<
+									cutoff << ")" << endl;
+							test_feature = ss.str();
+							break;
+						}
 					}
-				} // else { if ( DebugLevel > 2 ) cout << "; NO"; }
+					if ( DebugLevel > 1 )
+						cout << endl;
+				}
+			}
 
-				// if ( DebugLevel > 2 ) cout << endl;
+			if ( test_feature != "" ) {
+				FeatureScores* fs = &features[ test_feature ];
+
+				cd.negative += weight * fs->negative;
+				cd.neutral  += weight * fs->neutral;
+				cd.positive += weight * fs->positive;
+				cd.features.push_back( test_feature );
+
+				if ( DebugLevel > 0 ) cout << test_feature <<
+						" (neg=" << weight * fs->negative <<
+						" neu=" << weight * fs->neutral <<
+						" pos=" << weight * fs->positive << ")" << endl;
+
+				if ( fs->neutral > fs->positive && fs->neutral > fs->negative)
+					{ neutral_score++; }
+				else if ( fs->positive > fs->negative )
+					{ positive_score++; }
+				else if ( fs->negative > fs->positive )
+					{ negative_score++; }
+
+				i += s-1;
 			}
 		}
 
-		if ( test_feature != "" ) {
+		if ( cd.neutral > cd.negative && cd.neutral > cd.positive )
+			{ cd.decision = 0; cd.score = neutral_score; }
+		else if ( cd.positive > cd.negative )
+			{ cd.decision = 1; cd.score = positive_score; }
+		else if ( cd.negative > cd.positive )
+			{ cd.decision = -1; cd.score = negative_score; }
+		else // no decision could be reached
+			{ cd.decision = 0; cd.score = -1;
+			  error_msg = "no decision could be reached"; }
 
-			if ( fc.find ( test_feature ) == fc.end() )
-				fc[ test_feature ] = 0;
-			fc[ test_feature ] ++;
-
-			if ( DebugLevel > 1 ) cout << test_feature <<
-					" (" << features[ test_feature ].score << ")"
-					<< endl;
-
-			i += s-1;
-		}
+		if ( cd.score > 255 ) cd.score = 255;
+	} catch (...) {
+		cd.score = -1;
+		error_msg = "error in SentimentClassifier::classifyGreedy";
 	}
 
-	for ( FeaturesCount::const_iterator it = fc.begin();
-			it != fc.end(); it++ ) {
-
-		FeatureScores* fs = &features[ it->first ];
-
-		float feature_weight =
-			( 1.f + log ( float ( it->second ) ) / log ( 2.f ) );
-
-		int feature_score =
-			int ( feature_weight * float ( fs->score ) );
-
-		cd.raw_score += weight * feature_score;
-
-		if ( DebugLevel > 0 ) {
-			stringstream ss;
-			ss << it->first << " *";
-			ss << it->second << " = ";
-			ss << feature_score;
-			cd.features.push_back( ss.str() );
-		} else {
-			cd.features.push_back( it->first );
-		}
-
-	}
-
-	if ( cd.features.size() == 0 ) {
-		cd.confidence = 0;
-		error_msg = "no decision could be reached";
-		return false;
-	} else {
-		cd.decision   = calc_decision   ( cd.raw_score, nc );
-		cd.confidence = calc_confidence ( cd.raw_score );
-		return true;
-	}
+	return ( cd.score >= 0 );
 }
 
 CDecision::CDecision ()
-	: decision(0), raw_score(0), confidence(0), content(), features()
+	: decision(0), score(-1), negative(0), neutral(0), positive(0),
+	  content(), features()
 {}
 
 FeatureScores::FeatureScores ()
-	: score(0), relevance(0)
+	: negative(0), neutral(0), positive(0), relevance(0)
 {}
 
 SentimentClassifier::SentimentClassifier (
 		const string& feature_file, const string& stopword_file)
-	: UseQuestionMarks (true), UseExclamationPoints (true), UseEmoticons (true),
-	  RelevanceCutoff (-1.f), NeutralCutoff (-1.f), MaxFeatureSize (7),
-	  DebugLevel (0), error_msg (), TitleWeight (3), BodyWeight (1),
-	  URLWeight (1), isInited (false), features (), stopwords (),
-	  pre_normalized (false)
+	: RelevanceCutoff (1.0f), MaxFeatureSize (3), DebugLevel (0),
+	  error_msg (), TitleWeight (3), BodyWeight (1), URLWeight (1),
+	  isInited (false), features (), stopwords ()
 {
 	isInited =
 			readFeatures (feature_file);
@@ -339,157 +129,65 @@ SentimentClassifier::SentimentClassifier (
 }
 
 bool SentimentClassifier::Classify (
-		const string& content, CDecision& cd, int contentType )
+		const string& content, CDecision& cd)
 // return true if sentiment classification is successful; return false otherwise;
 {
-	float nc = NeutralCutoff;
-	float rc = RelevanceCutoff;
-
-	if ( contentType == Twitter && ( rc < 0 || nc < 0 ) ) {
-		rc = 1.f; nc = 5.f;
-	} else if ( contentType == Regular && ( rc < 0 || nc < 0 ) ) {
-		rc = 1.f; nc = 5.f;
-	}
-
-	cd.content = "\"" + content + "\"";
-
-	if ( contentType == Regular ) {
-		classifySentences ( 1, content, cd, contentType, rc, nc );
-	} else if ( contentType == Twitter ) {
-		string ncontent;
-		if ( ! normalizeTweet ( content, ncontent ) ) return false;
-		if ( DebugLevel > 0 ) cd.content += ";; " + ncontent;
-		classifyGreedy ( 1, ncontent, cd, contentType, rc, nc );
-	}
-
-	if ( UseEmoticons ) {
-		int count_pos;
-
-		count_pos  = countFeatures ( content, ":)" ) ;
-		count_pos += countFeatures ( content, ": )" ) ;
-		count_pos += countFeatures ( content, ":-)" ) ;
-		count_pos += countFeatures ( content, ":D" ) ;
-		count_pos += countFeatures ( content, "=)" ) ;
-		count_pos += countFeatures ( content, "(:" ) ;
-		count_pos += countFeatures ( content, ";)" );
-		count_pos += countFeatures ( content, ";-)" );
-		count_pos += countFeatures ( content, ";-)" );
-		count_pos += countFeatures ( content, ":]" );
-
-		count_pos += countFeatures ( content, "<3" );
-		count_pos += countFeatures ( content, "&lt;3" );
-
-		int count_neg;
-		count_neg  = countFeatures ( content, ":(" ) ;
-		count_neg += countFeatures ( content, ": (" ) ;
-		count_neg += countFeatures ( content, ":-(" ) ;
-		count_neg += countFeatures ( content, "):" ) ;
-		count_neg += countFeatures ( content, ":[" ) ;
-
-		int count = count_pos - count_neg;
-
-		if ( count != 0 ) {
-			cd.raw_score += count * 1000 ;
-
-			stringstream ss;
-			ss << ":) *" << count_pos << "; ";
-			ss << ":( *" << count_neg ;
-			cd.features.push_back ( ss.str() );
-		}
-	}
-
-	if ( UseExclamationPoints ) {
-		CDecision cd_ep;
-		classifyExclamationPoints ( 1, content, cd_ep );
-
-		if ( cd_ep.features.size () == 1 )
-			cd.features.push_back( cd_ep.features[0] );
-		cd.raw_score += cd_ep.raw_score;
-	}
-
-	if ( UseQuestionMarks ) {
-		CDecision cd_qm;
-		if ( contentType == Regular )
-			classifyQuestionMarks ( 1, content, cd_qm );
-		else if ( contentType == Twitter )
-			classifyTweetQuestionMarks ( 1, content, cd_qm );
-
-		if ( cd_qm.features.size () == 1 )
-			cd.features.push_back ( cd_qm.features[0] );
-		cd.raw_score += cd_qm.raw_score;
-	}
-
-
-	if ( cd.features.size() == 0 ) {
-		cd.confidence = 0;
-		error_msg = "no decision could be reached";
-		return false;
-	} else {
-		cd.decision   = calc_decision   ( cd.raw_score, nc );
-		cd.confidence = calc_confidence ( cd.raw_score );
-		return true;
-	}
+	string ncontent;
+	if ( normalizeContent ( content, ncontent ) )
+		return classifyGreedy ( 1, ncontent, cd );
+	else return false;
 }
 
 bool SentimentClassifier::Classify (
 		const string& title, const string& body,
-		const string& url, CDecision& cd, int contentType )
+		const string& url, CDecision& cd)
 // return true if sentiment classification is successful; return false otherwise;
 {
-	float nc = NeutralCutoff;
-	float rc = RelevanceCutoff;
-	if ( contentType == Twitter && ( rc < 0 || nc < 0 ) )
-		{ rc = 1.f; nc = 5.f; }
-	else if ( contentType == Regular && ( rc < 0 || nc < 0 ) )
-		{ rc = 1.f; nc = 5.f; }
-
-	cd.content  = "\"" + title + "\"+" +
-			"\"" + body + "\"+" +
-			"\"" + url + "\"" ;
-
 	string ncontent;
 	CDecision cd_title;
-	if ( normalizeContent ( title, ncontent ) ) {
-		cd.content += ";; " + ncontent;
-		classifyGreedy ( TitleWeight, ncontent, cd_title, contentType, rc, nc );
-	}
+	if ( normalizeContent ( title, ncontent ) )
+		classifyGreedy ( TitleWeight, ncontent, cd_title );
 	else return false;
 
 	CDecision cd_body;
-	if ( normalizeContent ( body, ncontent ) ) {
-		cd.content += ";; " + ncontent;
-		classifyGreedy ( BodyWeight, ncontent, cd_body, contentType, rc, nc );
-	}
+	if ( normalizeContent ( body, ncontent ) )
+		classifyGreedy ( BodyWeight, ncontent, cd_body );
 	else return false;
 
 	CDecision cd_url;
-	if ( normalizeUrl ( url, ncontent ) ) {
-		cd.content += ";; " + ncontent;
-		classifyGreedy ( URLWeight, ncontent, cd_url, contentType, rc, nc );
-	}
+	if ( normalizeUrl ( url, ncontent ) )
+		classifyGreedy ( URLWeight, ncontent, cd_url );
 	else return false;
 
-	cd.features.insert(cd.features.end(),
-					   cd_title.features.begin(),cd_title.features.end());
-	cd.features.insert(cd.features.end(),
-					   cd_body.features.begin(),cd_body.features.end());
-	cd.features.insert(cd.features.end(),
-					   cd_url.features.begin(),cd_url.features.end());
+	try {
+		cd.content  = cd_title.content + cd_body.content + cd_url.content;
+		cd.features.insert(cd.features.end(),
+						   cd_title.features.begin(),cd_title.features.end());
+		cd.features.insert(cd.features.end(),
+						   cd_body.features.begin(),cd_body.features.end());
+		cd.features.insert(cd.features.end(),
+						   cd_url.features.begin(),cd_url.features.end());
+		cd.negative = cd_title.negative + cd_body.negative + cd_url.negative;
+		cd.neutral  = cd_title.neutral  + cd_body.neutral  + cd_url.neutral;
+		cd.positive = cd_title.positive + cd_body.positive + cd_url.positive;
 
-	cd.raw_score =
-			cd_title.raw_score +
-			cd_body.raw_score +
-			cd_url.raw_score;
+		if ( cd.neutral > cd.negative && cd.neutral > cd.positive )
+			{ cd.decision = 0; cd.score = 1; }
+		else if ( cd.positive > cd.negative )
+			{ cd.decision = 1; cd.score = 1; }
+		else if ( cd.negative > cd.positive )
+			{ cd.decision = -1; cd.score = 1; }
+		else // no decision could be reached
+			{ cd.decision = 0; cd.score = -1;
+			  error_msg = "no decision could be reached"; }
 
-	if ( cd.features.size() == 0 ) {
-		cd.confidence = 0;
-		error_msg = "no decision could be reached";
-		return false;
-	} else {
-		cd.decision   = calc_decision   ( cd.raw_score, nc );
-		cd.confidence = calc_confidence ( cd.raw_score );
-		return true;
+		if ( cd.score > 255 ) cd.score = 255;
+	} catch (...) {
+		cd.score = -1;
+		error_msg = "error in SentimentClassifier::Classify";
 	}
+
+	return ( cd.score >= 0 );
 }
 
 bool SentimentClassifier::normalizeUrl (
@@ -499,13 +197,10 @@ bool SentimentClassifier::normalizeUrl (
 	try {
 		ncontent = boost::to_lower_copy ( content );
 
-		sregex httpx = sregex::compile( "https?://[^/]+/" );
+		sregex httpx = sregex::compile( "http:\\/\\/[^\\/]+\\/" );
 		ncontent = regex_replace ( ncontent, httpx, "" );
 
-		sregex htmlx = sregex::compile( "\\.html$" );
-		ncontent = regex_replace ( ncontent, htmlx, " " );
-
-		sregex punctx = sregex::compile( "[^a-zA-Z0-9]+" );
+		sregex punctx = sregex::compile( "[^\\w\\d]+" );
 		ncontent = regex_replace ( ncontent, punctx, " " );
 
 		status = true;
@@ -516,139 +211,63 @@ bool SentimentClassifier::normalizeUrl (
 	return status;
 }
 
-bool SentimentClassifier::normalizeTweet (
-		const string& content, string& ncontent )
-// normalize tweets
-{
-	ncontent = content;
-	if ( pre_normalized ) return true;
-
-	bool status = false;
-
-	try {
-		sregex rx01 = sregex::compile ( "(?<!\\\\)\\\\n" );
-		sregex rx02 = sregex::compile ( "(?<!\\\\)\\\\r" );
-		sregex rx03 = sregex::compile ( "(?<!\\\\)\\\\t" );
-
-		ncontent = regex_replace ( ncontent, rx01, " " );
-		ncontent = regex_replace ( ncontent, rx02, " " );
-		ncontent = regex_replace ( ncontent, rx03, " " );
-
-		hide_urls ( ncontent );
-		xlate_html_entities ( ncontent );
-
-		/*
-		sregex rx04 = sregex::compile ( "(?<![AQ]):\\)+" );
-		sregex rx05 = sregex::compile ( "(?<![AQ]): \\)+" );
-		sregex rx06 = sregex::compile ( "(?<![AQ]):-\\)+" );
-		//sregex rx17 = sregex::compile ( "(?<!Q):\\]+" );
-		sregex rx07 = sregex::compile ( "(?<![AQ]):D+" );
-		sregex rx08 = sregex::compile ( "=\\)+" );
-		sregex rx09 = sregex::compile ( "\\(+:" );
-
-		ncontent = regex_replace ( ncontent, rx04, "'smile'" );
-		ncontent = regex_replace ( ncontent, rx05, "'smile'" );
-		ncontent = regex_replace ( ncontent, rx06, "'smile'" );
-		//ncontent = regex_replace ( ncontent, rx17, "'smile'" );
-		ncontent = regex_replace ( ncontent, rx07, "'smile'" );
-		ncontent = regex_replace ( ncontent, rx08, "'smile'" );
-		ncontent = regex_replace ( ncontent, rx09, "'smile'" );
-
-		sregex rx10 = sregex::compile ( ";\\)+" );
-		sregex rx11 = sregex::compile ( ";-\\)+" );
-		ncontent = regex_replace ( ncontent, rx10, "'wink'" );
-		ncontent = regex_replace ( ncontent, rx11, "'wink'" );
-
-		sregex rx12 = sregex::compile ( "<3+" );
-		ncontent = regex_replace ( ncontent, rx12, "'heart'" );
-
-		sregex rx13 = sregex::compile ( "(?<![AQ]):\\(+" );
-		sregex rx14 = sregex::compile ( "(?<![AQ]): \\(+" );
-		sregex rx15 = sregex::compile ( "(?<![AQ]):-\\(+" );
-		//sregex rx18 = sregex::compile ( "(?<!Q):\\[+" );
-		sregex rx16 = sregex::compile ( "\\)+:" );
-
-		ncontent = regex_replace ( ncontent, rx13, "'unsmile'" );
-		ncontent = regex_replace ( ncontent, rx14, "'unsmile'" );
-		ncontent = regex_replace ( ncontent, rx15, "'unsmile'" );
-		ncontent = regex_replace ( ncontent, rx16, "'unsmile'" );
-		//ncontent = regex_replace ( ncontent, rx18, "'unsmile'" );
-		*/
-
-		// ** everything below should be case insensitive **
-
-		boost::to_lower ( ncontent );
-
-		sregex atx = sregex::compile ( "@[_a-z0-9]+" );
-		ncontent = regex_replace ( ncontent, atx, "'atdel'" );
-
-		sregex hashx = sregex::compile ( "#[_a-z0-9]+" );
-		ncontent = regex_replace ( ncontent, hashx, "'hashdel'" );
-
-		sregex ucx = sregex::compile ( "\\\\u[0-9a-f]{4}" );
-		ncontent = regex_replace ( ncontent, ucx, "'u'" );
-
-		sregex numx = sregex::compile ( "[,0-9\\.]*[0-9]" );
-		ncontent = regex_replace ( ncontent, numx, "'n'" );
-
-		// collapse multi-letter tweet content ( e.g. loooove! -> loove )
-		sregex tweetx = sregex::compile ( "(\\w)\\1+" );
-		ncontent = regex_replace ( ncontent, tweetx, "$1$1" );
-
-		sregex rtx = sregex::compile ( "\\brt " );
-		ncontent = regex_replace ( ncontent, rtx, "" );
-
-		sregex symbolx = sregex::compile( "[^a-z0-9\\']" );
-		ncontent = regex_replace ( ncontent, symbolx, " " );
-
-		collapse_ws ( ncontent );
-		trim_ws ( ncontent );
-
-		status = true;
-
-	} catch (...) {
-		error_msg = "error in SentimentClassifier::normalizeTweet";
-	}
-
-	return status;
-}
-
 bool SentimentClassifier::normalizeContent (
-		const string& content, string& ncontent )
+		const string& content, string& ncontent)
 // normalize punctuation and case of the content
 {
-	if ( pre_normalized ) {
-		ncontent = content;
-		return true;
-	}
-
 	bool status = false;
 	try {
 		ncontent = boost::to_lower_copy ( content );
 
-		// hash_tag hiding for tweets
-        sregex hashx = sregex::compile( "^#\\S+| #\\S+" );
-        ncontent = regex_replace ( ncontent, hashx, " " );
+		boost::replace_all ( ncontent, "[...]" , " " );
+		boost::replace_all ( ncontent, "(...)" , " " );
+		boost::replace_all ( ncontent, "^" , "" );
+		boost::replace_all ( ncontent, "," , " " );
+		boost::replace_all ( ncontent, "(" , " " );
+		boost::replace_all ( ncontent, ")" , " " );
+		boost::replace_all ( ncontent, "-" , " " );
+		boost::replace_all ( ncontent, "\"" , " " );
+		boost::replace_all ( ncontent, ": " , " " );
 
-        // at_tag hiding for tweets
-        sregex atx = sregex::compile( "^@\\S+| @\\S+" );
-        ncontent = regex_replace ( ncontent, atx, " " );
+		sregex quotx1 = sregex::compile( "^'| '" );
+		ncontent = regex_replace ( ncontent, quotx1, " " );
 
-        hide_urls ( ncontent );
+		sregex quotx2 = sregex::compile( "'$|' " );
+		ncontent = regex_replace ( ncontent, quotx2, " " );
 
-		// collapse multi-letter tweet content ( e.g. loooove! -> loove )
-		sregex tweetx = sregex::compile ( "(\\w)\\1+" );
-		ncontent = regex_replace ( ncontent, tweetx, "$1$1" );
+		sregex hashx = sregex::compile( "^#\\S+| #\\S+" );
+		ncontent = regex_replace ( ncontent, hashx, " " );
 
-		sregex rtx = sregex::compile ( "\\brt " );
-		ncontent = regex_replace ( ncontent, rtx, "" );
+		sregex atx = sregex::compile( "^@\\S+| @\\S+" );
+		ncontent = regex_replace ( ncontent, atx, " " );
 
-		sregex symbolx = sregex::compile( "[^a-z0-9\\']" );
-		ncontent = regex_replace ( ncontent, symbolx, " " );
+		sregex urlx = sregex::compile( "(http:[\\/\\w\\d\\.\\=\\&\\?]+)" );
 
-		collapse_ws ( ncontent );
-		trim_ws ( ncontent );
+		sregex_iterator cur( ncontent.begin(), ncontent.end(), urlx );
+		sregex_iterator end;
 
+		for( ; cur != end; ++cur ) {
+			boost::replace_all (
+					ncontent, cur->str(), boost::to_upper_copy (cur->str()) );
+		}
+
+		sregex perx1 = sregex::compile( "\\s*\\.\\.+\\s*" );
+		ncontent = regex_replace ( ncontent, perx1, " " );
+
+		sregex perx2 = sregex::compile( "([ a-z])\\.([ a-z])" );
+		ncontent = regex_replace ( ncontent, perx2, "$1 $2" );
+
+		sregex slashx = sregex::compile( "([ a-z])\\/([ a-z])" );
+		ncontent = regex_replace ( ncontent, slashx, "$1 $2" );
+
+		sregex uscorex = sregex::compile( "([ a-z])_([ a-z])" );
+		ncontent = regex_replace ( ncontent, uscorex , "$1 $2" );
+
+		sregex endx = sregex::compile( "\\W*$" );
+		ncontent = regex_replace ( ncontent, endx, "" );
+
+		sregex spacex = sregex::compile( "\\s+" );
+		ncontent = regex_replace ( ncontent, spacex, " " );
 
 		status = true;
 	} catch (...) {
@@ -658,54 +277,93 @@ bool SentimentClassifier::normalizeContent (
 	return status;
 }
 
-bool SentimentClassifier::parseFeature ( string& phrase, string& entry )
+bool SentimentClassifier::Inited () const
+// return true if the sentiment classifier is initialized properly.
+{
+	return isInited;
+}
+
+bool SentimentClassifier::readFeatures ( const string& features_file )
 {
 	bool isSuccess = false;
 
-	try { 	   // phrase is added to FeatureTable
+	string phrase, entry;
+	ifstream fs ( features_file.c_str() );
 
-		int score_data;
-		string feature_type = "";
-		stringstream iss (entry);
-		iss >> score_data;
-		if ( ! iss.eof() ) iss >> feature_type;
-
-		string feature_name = phrase;
-		if      ( feature_type == "re" ) feature_name += ":r";
-		else if ( feature_type == "tw" ) feature_name += ":t";
-		else      feature_name += ":r";
-
-		features[feature_name].score = score_data;
-		features[feature_name].relevance = abs ( score_data );
-
+	if ( fs.good() ) {
 		isSuccess = true;
-
-	} catch (...) {
-		error_msg = "error in SentimentClassifier::parseFeature";
+		while ( getline ( fs, phrase, '\t' ) ) {
+			getline ( fs, entry, '\n' );
+			isSuccess = parseFeature ( phrase, entry );
+			if ( !isSuccess ) break;
+		}
+	} else {
+		error_msg = "Failed to open features file.";
 	}
 
 	return isSuccess;
 }
 
-bool SentimentClassifier::readFeatures ( const string& features_file )
+bool SentimentClassifier::parseFeature ( string& phrase, string& entry )
 {
-	string phrase, entry;
-	ifstream fs ( features_file.c_str() );
+	bool isSuccess = false;
 
-	if ( fs.good() ) {
-		while ( getline ( fs, phrase, '\t' ) ) {
-			getline ( fs, entry, '\n' );
-			if ( ! parseFeature ( phrase, entry ) ) return false;
+	if 			( phrase == "CLASS:" )  { isSuccess = true; }
+	else if 	( phrase == "TOTAL:" )  { isSuccess = true; }
+	else if 	( phrase == "WTOTAL:" ) { isSuccess = true; }
+	else { 	   // phrase is added to FeatureTable
+		float raw_negative;
+		float raw_neutral;
+		float raw_positive;
+
+		stringstream iss (entry);
+		iss >> raw_negative;
+		iss >> raw_neutral;
+		iss >> raw_positive;
+
+		int negative;
+		int neutral;
+		int positive;
+
+		isSuccess =
+				scaleRawValue (raw_negative, negative) &&
+				scaleRawValue (raw_neutral,  neutral) &&
+				scaleRawValue (raw_positive, positive);
+
+		if ( isSuccess ) {
+			features[phrase].negative = negative;
+			features[phrase].neutral  = neutral;
+			features[phrase].positive = positive;
+
+			features[phrase].relevance = abs ( positive - negative );
+		} else {
+			error_msg = "Failed to parse feature line.";
 		}
+	}
+
+	return isSuccess;
+}
+
+bool SentimentClassifier::scaleRawValue (
+		float raw_value, int& scaled_value )
+{
+	if ( raw_value > 0.f ) {
+		scaled_value = (int) floor( FeatureScoreScale * log( raw_value ) );
 		return true;
 	} else {
-		error_msg = "Failed to open features file.";
 		return false;
 	}
 }
 
+float SentimentClassifier::getRawValue ( int scaled )
+{
+	return exp ( (float) scaled / FeatureScoreScale );
+}
+
 bool SentimentClassifier::readStopwords ( const string& stopwords_file )
 {
+	bool isSuccess = false;
+
 	string word;
 	ifstream fs ( stopwords_file.c_str() );
 
@@ -714,47 +372,12 @@ bool SentimentClassifier::readStopwords ( const string& stopwords_file )
 			fs >> word;
 			stopwords.insert ( make_pair ( word, 1 ) );
 		}
-		return true;
+		isSuccess = true;
 	} else {
 		error_msg = "Failed to open stopwords file.";
-		return false;
 	}
-}
 
-bool SentimentClassifier::Inited () const
-// return true if the sentiment classifier is initialized properly.
-{
-	return isInited;
-}
-
-void SentimentClassifier::setUseQuestionMarks ( bool qm )
-{
-	UseQuestionMarks = qm;
-}
-
-bool SentimentClassifier::getUseQuestionMarks () const
-{
-	return UseQuestionMarks;
-}
-
-void SentimentClassifier::setUseExclamationPoints ( bool ep )
-{
-	UseExclamationPoints = ep;
-}
-
-bool SentimentClassifier::getUseExclamationPoints () const
-{
-	return UseExclamationPoints;
-}
-
-void SentimentClassifier::setPreNormalized ( bool pn )
-{
-	pre_normalized = pn;
-}
-
-bool SentimentClassifier::getPreNormalized () const
-{
-	return pre_normalized;
+	return isSuccess;
 }
 
 void SentimentClassifier::setRelevanceCutoff ( float rc )
@@ -765,16 +388,6 @@ void SentimentClassifier::setRelevanceCutoff ( float rc )
 float SentimentClassifier::getRelevanceCutoff () const
 {
 	return RelevanceCutoff;
-}
-
-void SentimentClassifier::setNeutralCutoff ( float nc )
-{
-	NeutralCutoff = nc;
-}
-
-float SentimentClassifier::getNeutralCutoff () const
-{
-	return NeutralCutoff;
 }
 
 void SentimentClassifier::setMaxFeatureSize ( unsigned int mfs )

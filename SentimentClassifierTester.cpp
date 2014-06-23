@@ -21,9 +21,10 @@ void print ( CDecision& cd )
 // write decision using tab-separated format
 // column 1: normalized content
 // column 2: feature set used to make decision
-// column 3: decision from [-1, 0, +1] ( score in parens )
+// column 3: feature scores per class, scaled
+// column 4: decision from [-1, 0, +1] ( confidence in parens )
 {
-	cout << cd.content << "\t";
+	cout << "\"" << cd.content << "\"\t";
 
 	cout << "( ";
 	if ( cd.features.size()>0 )
@@ -31,14 +32,16 @@ void print ( CDecision& cd )
 			cout << cd.features[i] << "; ";
 	cout << ")\t";
 
-	if ( cd.confidence == 0 ) cout << "=";
-	else {
-		if ( cd.decision == 0 ) cout << "0 ";
-		else if ( cd.decision == -1 ) cout << "-1 ";
-		else if ( cd.decision == +1 ) cout << "+1 ";
-		cout << "( raw=" << cd.raw_score <<
-				"; norm=" << cd.confidence << " )";
-	}
+	cout << "( ";
+	cout << "negative=" << cd.negative << "; ";
+	cout << "neutral=" << cd.neutral << "; ";
+	cout << "positive=" << cd.positive << "; ";
+	cout << ")\t";
+
+	if ( cd.score < 0 ) cout << "=";
+	else if ( cd.decision == 0 ) cout << "0 (" << cd.score << ")";
+	else if ( cd.decision == -1 ) cout << "-1 (" << cd.score << ")";
+	else if ( cd.decision == +1 ) cout << "+1 (" << cd.score << ")";
 
 	cout << endl;
 }
@@ -101,23 +104,17 @@ int main(int argc, char **argv)
 
 	// various defaults, can be changed
 	unsigned int debug_level = 1;
-	float relevance_cutoff = -1.f;
-	float neutral_cutoff = -1.f;
+	float relevance_cutoff = 1.0f;
 	bool title_body_url = false;
-	bool question_marks = false;
-	bool pre_normalized = false;
-        ifstream *ifs = 0;
 	istream *in = &cin;
 
-	int ctype = SentimentClassifier::Regular;
-
 	// various defaults, fixed
-	unsigned int max_feature_size = 7;
+	unsigned int max_feature_size = 3;
 
 	try {
 
 		TCLAP::CmdLine cmd(
-				DescriptionMessage, ' ', "1.1.3");
+				DescriptionMessage, ' ', "1.1.0");
 
 		TCLAP::ValueArg<std::string> inputFilenameArg(
 				"c","classify","Input file (one text per line, tab-separated)",
@@ -132,35 +129,19 @@ int main(int argc, char **argv)
 				false,"","string",cmd);
 
 		TCLAP::ValueArg<unsigned int> debugLevelArg(
-				"d","debug","Level of debug info to produce",false,debug_level,
+				"d","debug","Level of debug info to produce",false,1,
 				"unsigned int",cmd);
 
 		TCLAP::ValueArg<unsigned int> maxFeatureSizeArg(
 				"m","max_feature_size","Max number of tokens in any feature",
-				false,max_feature_size,"unsigned int",cmd);
+				false,3,"unsigned int",cmd);
 
 		TCLAP::ValueArg<float> relevanceCutoffArg(
 				"r","relevance_cutoff","Relevance cutoff of feature set",
-				false,relevance_cutoff,"float",cmd);
-
-		TCLAP::ValueArg<float> neutralCutoffArg(
-				"n","neutral_cutoff","Neutral cutoff for classifier",
-				false,neutral_cutoff,"float",cmd);
+				false,1.0f,"float",cmd);
 
 		TCLAP::SwitchArg titleBodyUrlSwitch(
 				"t","title_body_url","Classify by title, body, and URL",
-				cmd,false);
-
-		TCLAP::SwitchArg questionMarksSwitch(
-				"q","question_marks","Use question marks to classify",
-				cmd,false);
-
-		TCLAP::SwitchArg preNormalizedSwitch(
-				"p","pre_normalized","Content has already been normalized",
-				cmd,false);
-
-		TCLAP::SwitchArg isTwitterSwitch(
-				"w","is_twitter","Content is of type twitter",
 				cmd,false);
 
 		cmd.parse( argc, argv );
@@ -168,8 +149,7 @@ int main(int argc, char **argv)
 		features_fn    = featuresFilenameArg.getValue();
 		stopwords_fn   = stopwordsFilenameArg.getValue();
 		if ( inputFilenameArg.isSet() ) {
-			ifs = new ifstream ( inputFilenameArg.getValue().c_str() );
-		        in = ifs;
+			in = new ifstream ( inputFilenameArg.getValue().c_str() );
 		}
 		if ( titleBodyUrlSwitch.isSet() )
 			title_body_url = titleBodyUrlSwitch.getValue();
@@ -182,18 +162,6 @@ int main(int argc, char **argv)
 
 		if ( relevanceCutoffArg.isSet() )
 			relevance_cutoff = relevanceCutoffArg.getValue();
-
-		if ( neutralCutoffArg.isSet() )
-			neutral_cutoff = neutralCutoffArg.getValue();
-
-		if ( questionMarksSwitch.isSet() )
-			question_marks = questionMarksSwitch.getValue();
-
-		if ( preNormalizedSwitch.isSet() )
-			pre_normalized = preNormalizedSwitch.getValue();
-
-		if ( isTwitterSwitch.isSet() )
-			ctype = SentimentClassifier::Twitter;
 
 	} catch (TCLAP::ArgException &e) {
 
@@ -214,16 +182,6 @@ int main(int argc, char **argv)
 	// RelevanceCutoff is the minimum relevance to use in feature set
 	classifier.setRelevanceCutoff ( relevance_cutoff );
 
-	// NeutralCutoff is the abs raw score less than which decision is neutral
-	classifier.setNeutralCutoff ( neutral_cutoff );
-
-	// Sets whether question marks should be used as a feature
-	classifier.setUseQuestionMarks ( question_marks );
-
-	// Sets whether the test content is already normalized
-	classifier.setPreNormalized ( pre_normalized );
-
-
 	// Inited checks where files are properly loaded
 	if ( classifier.Inited() ) {
 
@@ -235,9 +193,6 @@ int main(int argc, char **argv)
 
 			getline ( *in, inputLine );
 
-			if ( inputLine.length() == 0 )
-				break;
-
 			if ( title_body_url ) {
 
 				// Do title-body-url classification
@@ -245,7 +200,7 @@ int main(int argc, char **argv)
 				string title, body, url;
 
 				if ( getContent ( inputLine, title, body, url ) ) {
-					classifier.Classify ( title, body, url, decision, ctype );
+					classifier.Classify ( title, body, url, decision);
 					print ( decision );
 				} else
 					cerr << "Error parsing title, body and url! (\"" <<
@@ -258,7 +213,7 @@ int main(int argc, char **argv)
 				string content;
 
 				if ( getContent ( inputLine, content ) ) {
-					classifier.Classify ( content, decision, ctype );
+					classifier.Classify ( content, decision );
 					print ( decision );
 				} else
 					cerr << "Error parsing content! (\"" <<
@@ -266,11 +221,9 @@ int main(int argc, char **argv)
 
 			}
 
-			if ( debug_level > 1 ) cout << endl;
+			cout << endl;
 
 		}
-
-		if ( ifs ) { ifs->close(); delete ifs; }
 
 		return 0;
 
